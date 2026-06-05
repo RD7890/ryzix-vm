@@ -150,11 +150,11 @@ class VNCClient {
         msg[6] = 0  // big-endian = false
         msg[7] = 1  // true-colour = true
         // Red: max=255, shift=16
-        msg[8] = 0; msg[9] = 255
+        msg[8] = 0; msg[9] = 255.toByte()
         // Green: max=255, shift=8
-        msg[10] = 0; msg[11] = 255
+        msg[10] = 0; msg[11] = 255.toByte()
         // Blue: max=255, shift=0
-        msg[12] = 0; msg[13] = 255
+        msg[12] = 0; msg[13] = 255.toByte()
         msg[14] = 16 // red-shift
         msg[15] = 8  // green-shift
         msg[16] = 0  // blue-shift

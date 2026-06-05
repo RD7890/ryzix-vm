@@ -94,7 +94,8 @@ fun VMDisplayScreen(
                     canvas.scale(scale, scale)
                     canvas.drawImageRect(
                         image = vncBitmap!!.asImageBitmap(),
-                        dstSize = androidx.compose.ui.geometry.Size(size.width, size.height)
+                        paint = paint,
+                        dstSize = androidx.compose.ui.unit.IntSize(size.width.toInt(), size.height.toInt())
                     )
                     canvas.restore()
                 }
