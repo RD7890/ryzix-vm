@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Theme.Material.NoTitleBar.Fullscreen removed in compileSdk 35; use AppCompat equivalent -->
-    <style name="Theme.RyzixVM" parent="Theme.AppCompat.DayNight.NoActionBar">
+    <!--
+        Pure Compose app (ComponentActivity, no AppCompat).
+        Parent must be a *public* platform theme — Theme.Material.Light.NoActionBar
+        is listed in android/res/values/public.xml since API 21.
+        Fullscreen is achieved via windowFullscreen + windowNoTitle items.
+        Compose draws everything; this XML theme just configures the window.
+    -->
+    <style name="Theme.RyzixVM" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowFullscreen">true</item>
