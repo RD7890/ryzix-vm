@@ -50,17 +50,19 @@ jobs:
       - name: Download Gradle wrapper jar
         run: |
           mkdir -p gradle/wrapper
+          # Official Gradle wrapper jar via refs/tags
           curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
-            "https://github.com/gradle/gradle/raw/v8.9.0/gradle/wrapper/gradle-wrapper.jar" \
-            || curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
-            "https://services.gradle.org/distributions/gradle-8.9-bin.zip.sha256" \
+            "https://github.com/gradle/gradle/raw/refs/tags/v8.9.0/gradle/wrapper/gradle-wrapper.jar" \
             || true
-          # Try alternative: use gradle to generate wrapper
+          # Fallback: download the full distribution and extract the jar
           if [ ! -s gradle/wrapper/gradle-wrapper.jar ]; then
+            echo "Primary download failed, using distribution fallback..."
             wget -q https://services.gradle.org/distributions/gradle-8.9-bin.zip -O /tmp/gradle.zip
             unzip -q /tmp/gradle.zip -d /tmp/
-            /tmp/gradle-8.9/bin/gradle wrapper --gradle-version 8.9 --distribution-type bin
+            cp /tmp/gradle-8.9/lib/gradle-wrapper-*.jar gradle/wrapper/gradle-wrapper.jar 2>/dev/null \
+              || /tmp/gradle-8.9/bin/gradle wrapper --gradle-version 8.9 --distribution-type bin
           fi
+          echo "Wrapper jar size: $(wc -c < gradle/wrapper/gradle-wrapper.jar) bytes"
           ls -la gradle/wrapper/
 
       - name: Make gradlew executable
@@ -72,8 +74,9 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-v2-${{ hashFiles('**/*.gradle*', '**/libs.versions.toml') }}
+          key: ${{ runner.os }}-gradle-v3-${{ hashFiles('**/*.gradle*', '**/libs.versions.toml', '**/gradle.properties') }}
           restore-keys: |
+            ${{ runner.os }}-gradle-v3-
             ${{ runner.os }}-gradle-
 
       - name: Restore QEMU build cache
@@ -81,7 +84,7 @@ jobs:
         id: qemu-cache
         with:
           path: qemu-android-build
-          key: ${{ runner.os }}-qemu-limbo-arm64-v2-${{ hashFiles('.github/workflows/build.yml') }}
+          key: ${{ runner.os }}-qemu-limbo-arm64-v3-${{ hashFiles('.github/workflows/build.yml') }}
 
       - name: Install QEMU build dependencies
         if: steps.qemu-cache.outputs.cache-hit != 'true'
@@ -92,72 +95,101 @@ jobs:
             libglib2.0-dev libfdt-dev libpixman-1-dev \
             zlib1g-dev flex bison pkg-config meson wget unzip
 
-      - name: Clone Limbo QEMU source
-        if: steps.qemu-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth=1 https://github.com/limboemu/limbo.git limbo-src
-
-      - name: Build QEMU for Android ARM64
+      - name: Build QEMU for Android ARM64 (stub mode if build fails)
         if: steps.qemu-cache.outputs.cache-hit != 'true'
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          set +e  # QEMU build failures are non-fatal — app has built-in stub mode
           mkdir -p qemu-android-build
+
           NDK=$ANDROID_NDK_HOME
           TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
           API=26
           TARGET=aarch64-linux-android
 
+          # Export toolchain env vars (used by both Limbo and direct QEMU build)
           export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
           export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
           export AR=$TOOLCHAIN/bin/llvm-ar
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
+          export CROSS_PREFIX=$TOOLCHAIN/bin/${TARGET}${API}-
 
-          # Try Limbo's build system first
+          # Try Limbo's build system first (it has proper Android patches)
+          echo "Cloning Limbo QEMU source..."
+          git clone --depth=1 https://github.com/limboemu/limbo.git limbo-src 2>&1 | tail -5
+
           LIMBO_JNI="limbo-src/limbo-android-lib/src/main/jni"
-          if [ -f "$LIMBO_JNI/build-qemu.sh" ]; then
-            echo "Using Limbo build script..."
-            cd $LIMBO_JNI
-            chmod +x *.sh 2>/dev/null || true
-            NDK_HOME=$NDK ./build-qemu.sh arm64-v8a 2>&1 | tail -50
-            cd $GITHUB_WORKSPACE
-            find limbo-src -name "*.so" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
-            find limbo-src -name "*.a" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
+          LIMBO_BUILD_SCRIPT=""
+          # Search for any build script in the Limbo JNI tree
+          for script in "$LIMBO_JNI/build-qemu.sh" \
+                        "$LIMBO_JNI/build.sh" \
+                        "limbo-src/build-qemu.sh"; do
+            if [ -f "$script" ]; then
+              LIMBO_BUILD_SCRIPT="$script"
+              break
+            fi
+          done
+
+          if [ -n "$LIMBO_BUILD_SCRIPT" ]; then
+            echo "Using Limbo build script: $LIMBO_BUILD_SCRIPT"
+            chmod +x "$LIMBO_BUILD_SCRIPT"
+            NDK_HOME=$NDK "$LIMBO_BUILD_SCRIPT" arm64-v8a 2>&1 | tail -80
+            find limbo-src -name "*.so" ! -name "vdso*" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
+            find limbo-src -name "libqemu*.a" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
           else
-            echo "Limbo build script not found, trying QEMU source in limbo..."
-            QEMU_SRC=$(find limbo-src -name "configure" -path "*/qemu*" | head -1 | xargs dirname 2>/dev/null || echo "")
+            echo "Limbo build script not found — trying direct QEMU cross-compile..."
+            # Find QEMU configure in Limbo source tree
+            QEMU_SRC=$(find limbo-src -name "configure" -path "*/qemu*" -not -path "*/.git/*" | head -1 | xargs -r dirname || echo "")
+
             if [ -z "$QEMU_SRC" ]; then
-              echo "Fetching QEMU 8.2 source..."
-              git clone --depth=1 --branch v8.2.0 https://github.com/qemu/qemu.git qemu-src
+              echo "No QEMU source in Limbo — cloning QEMU 9.2..."
+              git clone --depth=1 --branch v9.2.0 https://github.com/qemu/qemu.git qemu-src 2>&1 | tail -5 || \
+              git clone --depth=1 https://github.com/qemu/qemu.git qemu-src 2>&1 | tail -5
               QEMU_SRC="qemu-src"
             fi
-            cd $QEMU_SRC
+
+            cd "$QEMU_SRC"
             mkdir -p build-android && cd build-android
+
+            # NOTE: --ar and --ranlib are NOT valid configure args in QEMU 8+
+            # They are picked up from the CC/AR environment variables above.
             ../configure \
-              --cc=$CC --cxx=$CXX --ar=$AR --ranlib=$RANLIB \
+              --cross-prefix="${TOOLCHAIN}/bin/${TARGET}${API}-" \
+              --cc=$CC \
+              --cxx=$CXX \
               --static \
               --target-list="aarch64-softmmu" \
               --disable-sdl --disable-gtk --disable-opengl \
               --disable-docs --disable-werror \
               --enable-vnc --disable-vnc-sasl \
               2>&1 | tail -30
+
             make -j$(nproc) 2>&1 | tail -80
-            cd $GITHUB_WORKSPACE
-            find qemu-src -name "*.so" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
+
+            cd "$GITHUB_WORKSPACE"
+            # Only copy real QEMU libraries — exclude tiny kernel vdso stubs
+            find qemu-src -name "*.so" ! -name "vdso*" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
+            find qemu-src -name "libqemu*.a" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
           fi
+
           echo "=== QEMU build output ==="
-          ls -la qemu-android-build/ || echo "No output files"
+          ls -lh qemu-android-build/ || echo "No output files — will build in stub mode"
+          set -e
 
       - name: Copy QEMU libs to jniLibs
         run: |
           mkdir -p app/src/main/jniLibs/arm64-v8a
-          if ls qemu-android-build/*.so 2>/dev/null; then
-            cp qemu-android-build/*.so app/src/main/jniLibs/arm64-v8a/ || true
-            echo "Copied .so files:"
-            ls -la app/src/main/jniLibs/arm64-v8a/
+          # Only copy real QEMU libraries (not vdso kernel stubs)
+          REAL_LIBS=$(find qemu-android-build -name "*.so" ! -name "vdso*" -o -name "libqemu*.a" 2>/dev/null | wc -l)
+          if [ "$REAL_LIBS" -gt 0 ]; then
+            find qemu-android-build \( -name "*.so" ! -name "vdso*" -o -name "libqemu*.a" \) \
+              -exec cp {} app/src/main/jniLibs/arm64-v8a/ \; || true
+            echo "Copied QEMU libs:"
+            ls -lh app/src/main/jniLibs/arm64-v8a/
           else
-            echo "No prebuilt .so found — stub mode (QEMU_AVAILABLE=0)"
+            echo "No real QEMU libs found — CMake will build in stub mode (QEMU_AVAILABLE=0)"
           fi
 
       - name: Generate signing keystore
@@ -189,7 +221,11 @@ jobs:
             -Pandroid.ndkPath=$ANDROID_NDK_HOME \
             --no-daemon \
             --stacktrace \
-            2>&1 | tail -150
+            2>&1 | tee /tmp/gradle-release.log
+          echo "Exit code: ${PIPESTATUS[0]}"
+          # Fail the step if Gradle failed (tee masks the exit code)
+          tail -30 /tmp/gradle-release.log
+          grep -q "BUILD SUCCESSFUL" /tmp/gradle-release.log
 
       - name: Build Debug APK (fallback if release fails)
         if: failure()
@@ -200,9 +236,11 @@ jobs:
             -Pandroid.ndkPath=$ANDROID_NDK_HOME \
             --no-daemon \
             --stacktrace \
-            2>&1 | tail -150
+            2>&1 | tee /tmp/gradle-debug.log
+          grep -q "BUILD SUCCESSFUL" /tmp/gradle-debug.log
 
       - name: Collect APKs
+        if: always()
         run: |
           mkdir -p output
           find app/build/outputs/apk -name "*.apk" -exec cp {} output/ \; 2>/dev/null || true
@@ -212,18 +250,21 @@ jobs:
       - name: Get version name
         id: version
         run: |
-          VERSION="1.0.0"
+          VERSION=$(grep 'versionName' app/build.gradle.kts | head -1 | sed 's/.*"\(.*\)".*/\1/' || echo "1.0.0")
           echo "name=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
 
       - name: Upload APK artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ryzix-vm-apk-${{ github.run_number }}
           path: output/*.apk
           retention-days: 30
+          if-no-files-found: warn
 
       - name: Create GitHub Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
+        if: (success() || failure()) && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.name }}-build.${{ github.run_number }}
@@ -250,5 +291,6 @@ jobs:
           draft: false
           prerelease: true
           files: output/*.apk
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
