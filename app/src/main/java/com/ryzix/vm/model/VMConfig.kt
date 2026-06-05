@@ -15,7 +15,7 @@ enum class VMStatus {
 data class VMConfig(
     val id: String = UUID.randomUUID().toString(),
     val name: String = "New VM",
-    val arch: VMArch = VMArch.AARCH64,
+    val arch: VMArch = VMArch.X86_64,
     val ramMB: Int = 512,
     val cpuCores: Int = 2,
     val diskImagePath: String = "",
@@ -35,19 +35,38 @@ fun VMConfig.toQEMUArgs(): Array<String> {
     args.add("${ramMB}M")
     args.add("-smp")
     args.add("$cpuCores")
+
+    // No graphical display backend — output goes through VNC only
+    args.add("-display")
+    args.add("none")
+
     args.add("-vnc")
     args.add(":${vncPort - 5900}")
     args.add("-rtc")
     args.add("base=utc")
     args.add("-no-reboot")
 
-    if (arch == VMArch.AARCH64) {
-        args.add("-machine")
-        args.add("virt")
-        args.add("-cpu")
-        args.add("cortex-a72")
-        args.add("-bios")
-        args.add("QEMU_EFI.fd")
+    when (arch) {
+        VMArch.AARCH64 -> {
+            args.add("-machine")
+            args.add("virt")
+            args.add("-cpu")
+            args.add("cortex-a72")
+            args.add("-bios")
+            args.add("QEMU_EFI.fd")
+        }
+        VMArch.X86_64 -> {
+            args.add("-machine")
+            args.add("pc")
+            args.add("-cpu")
+            args.add("qemu64")
+        }
+        VMArch.I386 -> {
+            args.add("-machine")
+            args.add("pc")
+            args.add("-cpu")
+            args.add("qemu32")
+        }
     }
 
     if (diskImagePath.isNotEmpty()) {

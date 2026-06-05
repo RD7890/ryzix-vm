@@ -1,12 +1,12 @@
 package com.ryzix.vm.viewmodel
 
 import android.app.Application
-import android.content.Context
 import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ryzix.vm.model.VMConfig
+import com.ryzix.vm.model.VMArch
 import com.ryzix.vm.model.VMStatus
 import com.ryzix.vm.model.toQEMUArgs
 import com.ryzix.vm.qemu.QEMUBridge
@@ -57,14 +57,14 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
             _vmList.value = listOf(
                 VMConfig(
                     name = "Tiny Core Linux (Test)",
-                    arch = com.ryzix.vm.model.VMArch.AARCH64,
+                    arch = VMArch.X86_64,
                     ramMB = 128,
                     cpuCores = 1,
                     bootFromCdrom = true
                 ),
                 VMConfig(
                     name = "Debian 12 XFCE",
-                    arch = com.ryzix.vm.model.VMArch.AARCH64,
+                    arch = VMArch.X86_64,
                     ramMB = 1024,
                     cpuCores = 2,
                     bootFromCdrom = false
@@ -98,7 +98,7 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 getApplication<Application>().startForegroundService(serviceIntent)
 
-                val result = QEMUBridge.startQEMU(args)
+                val result = QEMUBridge.startQEMU(getApplication(), args)
 
                 if (result == 0) {
                     _vmStatus.value = VMStatus.RUNNING
