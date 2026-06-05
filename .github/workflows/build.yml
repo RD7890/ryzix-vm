@@ -89,24 +89,9 @@ jobs:
 
           mkdir -p app/src/main/jniLibs/arm64-v8a
 
-          python3 - <<'PYEOF'
-import zipfile, os
+          # APK is a zip — unzip -j extracts without recreating subdirectories
+          unzip -j /tmp/limbo.apk "lib/arm64-v8a/*.so" -d app/src/main/jniLibs/arm64-v8a/
 
-apk = '/tmp/limbo.apk'
-out = 'app/src/main/jniLibs/arm64-v8a'
-os.makedirs(out, exist_ok=True)
-
-with zipfile.ZipFile(apk) as z:
-    for name in z.namelist():
-        if name.startswith('lib/arm64-v8a/') and name.endswith('.so'):
-            fname = os.path.basename(name)
-            data = z.read(name)
-            with open(os.path.join(out, fname), 'wb') as f:
-                f.write(data)
-            print(f'  Extracted: {fname} ({len(data)//1024} KB)')
-PYEOF
-
-          echo ""
           echo "=== arm64-v8a native libs ==="
           ls -lh app/src/main/jniLibs/arm64-v8a/
 
