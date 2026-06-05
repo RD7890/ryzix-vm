@@ -1,0 +1,81 @@
+package com.ryzix.vm.model
+
+import java.util.UUID
+
+enum class VMArch(val displayName: String, val qemuBin: String) {
+    AARCH64("ARM64 (aarch64)", "qemu-system-aarch64"),
+    X86_64("x86_64", "qemu-system-x86_64"),
+    I386("x86 (32-bit)", "qemu-system-i386")
+}
+
+enum class VMStatus {
+    STOPPED, STARTING, RUNNING, STOPPING, ERROR
+}
+
+data class VMConfig(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "New VM",
+    val arch: VMArch = VMArch.AARCH64,
+    val ramMB: Int = 512,
+    val cpuCores: Int = 2,
+    val diskImagePath: String = "",
+    val cdromImagePath: String = "",
+    val vncPort: Int = 5900,
+    val bootFromCdrom: Boolean = true,
+    val enableKvm: Boolean = false,
+    val extraArgs: String = "",
+    val createdAt: Long = System.currentTimeMillis()
+)
+
+fun VMConfig.toQEMUArgs(): Array<String> {
+    val args = mutableListOf<String>()
+
+    args.add(arch.qemuBin)
+    args.add("-m")
+    args.add("${ramMB}M")
+    args.add("-smp")
+    args.add("$cpuCores")
+    args.add("-vnc")
+    args.add(":${vncPort - 5900}")
+    args.add("-rtc")
+    args.add("base=utc")
+    args.add("-no-reboot")
+
+    if (arch == VMArch.AARCH64) {
+        args.add("-machine")
+        args.add("virt")
+        args.add("-cpu")
+        args.add("cortex-a72")
+        args.add("-bios")
+        args.add("QEMU_EFI.fd")
+    }
+
+    if (diskImagePath.isNotEmpty()) {
+        args.add("-drive")
+        args.add("file=$diskImagePath,format=qcow2,if=virtio")
+    }
+
+    if (cdromImagePath.isNotEmpty()) {
+        args.add("-drive")
+        args.add("file=$cdromImagePath,format=raw,if=virtio,media=cdrom")
+        if (bootFromCdrom) {
+            args.add("-boot")
+            args.add("d")
+        }
+    }
+
+    if (enableKvm) {
+        args.add("-enable-kvm")
+    }
+
+    args.add("-netdev")
+    args.add("user,id=net0")
+    args.add("-device")
+    args.add("virtio-net-pci,netdev=net0")
+
+    if (extraArgs.isNotEmpty()) {
+        args.addAll(extraArgs.split(" ").filter { it.isNotBlank() })
+    }
+
+    return args.toTypedArray()
+}
