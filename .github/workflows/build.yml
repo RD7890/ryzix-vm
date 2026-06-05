@@ -8,7 +8,6 @@ on:
       - "release/**"
     paths-ignore:
       - '**.md'
-      - 'fastlane/**'
   pull_request:
     branches: [ "main", "dev" ]
     paths-ignore:
@@ -39,7 +38,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           java-version: '17'
-          distribution: 'adopt'
+          distribution: 'temurin'
 
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
@@ -48,9 +47,24 @@ jobs:
           ndk-version: r27c
           add-to-path: true
 
-      - name: Change Gradle wrapper permissions
+      - name: Download Gradle wrapper jar
+        run: |
+          mkdir -p gradle/wrapper
+          curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
+            "https://github.com/gradle/gradle/raw/v8.9.0/gradle/wrapper/gradle-wrapper.jar" \
+            || curl -fsSL -o gradle/wrapper/gradle-wrapper.jar \
+            "https://services.gradle.org/distributions/gradle-8.9-bin.zip.sha256" \
+            || true
+          # Try alternative: use gradle to generate wrapper
+          if [ ! -s gradle/wrapper/gradle-wrapper.jar ]; then
+            wget -q https://services.gradle.org/distributions/gradle-8.9-bin.zip -O /tmp/gradle.zip
+            unzip -q /tmp/gradle.zip -d /tmp/
+            /tmp/gradle-8.9/bin/gradle wrapper --gradle-version 8.9 --distribution-type bin
+          fi
+          ls -la gradle/wrapper/
+
+      - name: Make gradlew executable
         run: chmod +x ./gradlew
-        working-directory: ryzix-vm
 
       - name: Restore Gradle cache
         uses: actions/cache@v4
@@ -58,7 +72,7 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-v2-${{ hashFiles('ryzix-vm/**/*.gradle*', 'ryzix-vm/**/libs.versions.toml') }}
+          key: ${{ runner.os }}-gradle-v2-${{ hashFiles('**/*.gradle*', '**/libs.versions.toml') }}
           restore-keys: |
             ${{ runner.os }}-gradle-
 
@@ -66,135 +80,106 @@ jobs:
         uses: actions/cache@v4
         id: qemu-cache
         with:
-          path: ryzix-vm/qemu-android-build
-          key: ${{ runner.os }}-qemu-limbo-arm64-${{ hashFiles('ryzix-vm/.github/workflows/build.yml') }}
+          path: qemu-android-build
+          key: ${{ runner.os }}-qemu-limbo-arm64-v2-${{ hashFiles('.github/workflows/build.yml') }}
 
       - name: Install QEMU build dependencies
+        if: steps.qemu-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
             git ninja-build python3 python3-pip \
             libglib2.0-dev libfdt-dev libpixman-1-dev \
-            zlib1g-dev flex bison pkg-config \
-            meson
+            zlib1g-dev flex bison pkg-config meson wget unzip
 
-      - name: Clone Limbo QEMU (Android-compatible fork)
+      - name: Clone Limbo QEMU source
         if: steps.qemu-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth=1 --branch master \
-            https://github.com/limboemu/limbo.git \
-            ryzix-vm/limbo-src
+          git clone --depth=1 https://github.com/limboemu/limbo.git limbo-src
 
       - name: Build QEMU for Android ARM64
         if: steps.qemu-cache.outputs.cache-hit != 'true'
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          export NDK=$ANDROID_NDK_HOME
-          export HOST_TAG=linux-x86_64
-          export TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/$HOST_TAG
-          export API=26
-          export TARGET=aarch64-linux-android
-          export AR=$TOOLCHAIN/bin/llvm-ar
+          mkdir -p qemu-android-build
+          NDK=$ANDROID_NDK_HOME
+          TOOLCHAIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          API=26
+          TARGET=aarch64-linux-android
+
           export CC=$TOOLCHAIN/bin/${TARGET}${API}-clang
           export CXX=$TOOLCHAIN/bin/${TARGET}${API}-clang++
-          export LD=$TOOLCHAIN/bin/ld
+          export AR=$TOOLCHAIN/bin/llvm-ar
           export RANLIB=$TOOLCHAIN/bin/llvm-ranlib
           export STRIP=$TOOLCHAIN/bin/llvm-strip
 
-          mkdir -p ryzix-vm/qemu-android-build
-
-          cd ryzix-vm/limbo-src
-
-          # Use Limbo's pre-built Android QEMU setup if available
-          if [ -f "limbo-android-lib/src/main/jni/build-qemu.sh" ]; then
-            echo "Using Limbo build script"
-            cd limbo-android-lib/src/main/jni
-            chmod +x build-qemu.sh
-            NDK_HOME=$NDK ./build-qemu.sh arm64-v8a || true
+          # Try Limbo's build system first
+          LIMBO_JNI="limbo-src/limbo-android-lib/src/main/jni"
+          if [ -f "$LIMBO_JNI/build-qemu.sh" ]; then
+            echo "Using Limbo build script..."
+            cd $LIMBO_JNI
+            chmod +x *.sh 2>/dev/null || true
+            NDK_HOME=$NDK ./build-qemu.sh arm64-v8a 2>&1 | tail -50
+            cd $GITHUB_WORKSPACE
+            find limbo-src -name "*.so" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
+            find limbo-src -name "*.a" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
           else
-            echo "Limbo build script not found, building QEMU manually"
-            # Manual QEMU build for Android
-            QEMU_DIR=$(find . -name "configure" -path "*/qemu/*" | head -1 | xargs dirname)
-            if [ -z "$QEMU_DIR" ]; then
-              # Clone mainline QEMU and apply Android patches
+            echo "Limbo build script not found, trying QEMU source in limbo..."
+            QEMU_SRC=$(find limbo-src -name "configure" -path "*/qemu*" | head -1 | xargs dirname 2>/dev/null || echo "")
+            if [ -z "$QEMU_SRC" ]; then
+              echo "Fetching QEMU 8.2 source..."
               git clone --depth=1 --branch v8.2.0 https://github.com/qemu/qemu.git qemu-src
-              QEMU_DIR="qemu-src"
+              QEMU_SRC="qemu-src"
             fi
-
-            cd $QEMU_DIR
+            cd $QEMU_SRC
             mkdir -p build-android && cd build-android
-
             ../configure \
-              --cross-prefix=${TARGET}- \
-              --cc=$CC \
-              --cxx=$CXX \
-              --ar=$AR \
-              --ranlib=$RANLIB \
+              --cc=$CC --cxx=$CXX --ar=$AR --ranlib=$RANLIB \
               --static \
-              --disable-system \
-              --enable-user \
-              --target-list="aarch64-linux-user" \
-              --disable-vnc \
-              --disable-sdl \
-              --disable-gtk \
-              --disable-opengl \
-              --disable-docs \
-              --disable-debug-info \
-              --disable-werror \
-              2>&1 | tail -20
-
-            make -j$(nproc) 2>&1 | tail -50
+              --target-list="aarch64-softmmu" \
+              --disable-sdl --disable-gtk --disable-opengl \
+              --disable-docs --disable-werror \
+              --enable-vnc --disable-vnc-sasl \
+              2>&1 | tail -30
+            make -j$(nproc) 2>&1 | tail -80
+            cd $GITHUB_WORKSPACE
+            find qemu-src -name "*.so" -exec cp {} qemu-android-build/ \; 2>/dev/null || true
           fi
+          echo "=== QEMU build output ==="
+          ls -la qemu-android-build/ || echo "No output files"
 
-          # Copy output libs
-          find . -name "*.a" -exec cp {} /home/runner/work/$(basename $(pwd))/$(basename $(pwd))/ryzix-vm/qemu-android-build/ \; 2>/dev/null || true
-          find . -name "libqemu*.so" -exec cp {} /home/runner/work/$(basename $(pwd))/$(basename $(pwd))/ryzix-vm/qemu-android-build/ \; 2>/dev/null || true
-          ls -la /home/runner/work/$(basename $(pwd))/$(basename $(pwd))/ryzix-vm/qemu-android-build/ || true
-          echo "QEMU build complete"
-
-      - name: Copy prebuilt QEMU libs to jniLibs
+      - name: Copy QEMU libs to jniLibs
         run: |
-          mkdir -p ryzix-vm/app/src/main/jniLibs/arm64-v8a
-          QEMU_BUILD=ryzix-vm/qemu-android-build
-
-          # Copy any compiled .so files found
-          if ls $QEMU_BUILD/*.so 2>/dev/null; then
-            cp $QEMU_BUILD/*.so ryzix-vm/app/src/main/jniLibs/arm64-v8a/ || true
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          if ls qemu-android-build/*.so 2>/dev/null; then
+            cp qemu-android-build/*.so app/src/main/jniLibs/arm64-v8a/ || true
+            echo "Copied .so files:"
+            ls -la app/src/main/jniLibs/arm64-v8a/
+          else
+            echo "No prebuilt .so found — stub mode (QEMU_AVAILABLE=0)"
           fi
 
-          # Copy static libs for linking
-          if ls $QEMU_BUILD/*.a 2>/dev/null; then
-            cp $QEMU_BUILD/*.a ryzix-vm/app/src/main/jniLibs/arm64-v8a/ || true
-          fi
-
-          echo "jniLibs contents:"
-          ls -la ryzix-vm/app/src/main/jniLibs/arm64-v8a/ || echo "(empty — stub build)"
-
-      - name: Generate debug keystore
+      - name: Generate signing keystore
         run: |
-          mkdir -p ryzix-vm/signing
+          mkdir -p signing
           keytool -genkey -v \
-            -keystore ryzix-vm/signing/signing-key.jks \
+            -keystore signing/signing-key.jks \
             -alias RyzixVM \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass ryzixvm123 \
-            -keypass ryzixvm123 \
-            -dname "CN=Ryzix VM, OU=Android, O=Ryzix, L=Unknown, S=Unknown, C=US" \
-            2>&1 | tail -5
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass ryzixvm123 -keypass ryzixvm123 \
+            -dname "CN=Ryzix VM,OU=Android,O=Ryzix,L=Unknown,S=Unknown,C=US" \
+            2>&1 | tail -3
 
       - name: Create local.properties
         run: |
-          echo "signing.storeFile=signing/signing-key.jks" >> ryzix-vm/local.properties
-          echo "signing.storePassword=ryzixvm123" >> ryzix-vm/local.properties
-          echo "signing.keyAlias=RyzixVM" >> ryzix-vm/local.properties
-          echo "signing.keyPassword=ryzixvm123" >> ryzix-vm/local.properties
-          echo "sdk.dir=$ANDROID_HOME" >> ryzix-vm/local.properties
+          echo "signing.storeFile=signing/signing-key.jks" > local.properties
+          echo "signing.storePassword=ryzixvm123" >> local.properties
+          echo "signing.keyAlias=RyzixVM" >> local.properties
+          echo "signing.keyPassword=ryzixvm123" >> local.properties
+          echo "sdk.dir=$ANDROID_HOME" >> local.properties
 
       - name: Build Release APK
-        working-directory: ryzix-vm
         env:
           SIGNING_STORE_PASSWORD: "ryzixvm123"
           SIGNING_KEY_PASSWORD: "ryzixvm123"
@@ -202,38 +187,39 @@ jobs:
         run: |
           ./gradlew :app:assembleRelease \
             -Pandroid.ndkPath=$ANDROID_NDK_HOME \
+            --no-daemon \
             --stacktrace \
-            2>&1 | tail -100
+            2>&1 | tail -150
 
-      - name: Build Debug APK (fallback)
+      - name: Build Debug APK (fallback if release fails)
         if: failure()
-        working-directory: ryzix-vm
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
           ./gradlew :app:assembleDebug \
             -Pandroid.ndkPath=$ANDROID_NDK_HOME \
+            --no-daemon \
             --stacktrace \
-            2>&1 | tail -100
+            2>&1 | tail -150
 
-      - name: Rename APK
+      - name: Collect APKs
         run: |
-          mkdir -p ryzix-vm/output
-          find ryzix-vm/app/build/outputs/apk -name "*.apk" -exec cp {} ryzix-vm/output/ \; 2>/dev/null || true
-          ls -la ryzix-vm/output/
+          mkdir -p output
+          find app/build/outputs/apk -name "*.apk" -exec cp {} output/ \; 2>/dev/null || true
+          echo "=== Output APKs ==="
+          ls -lh output/ || echo "No APKs found"
 
-      - name: Get version info
+      - name: Get version name
         id: version
         run: |
           VERSION="1.0.0"
           echo "name=$VERSION" >> $GITHUB_OUTPUT
-          echo "Build version: $VERSION build #${{ github.run_number }}"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: ryzix-vm-apk-${{ github.run_number }}
-          path: ryzix-vm/output/*.apk
+          path: output/*.apk
           retention-days: 30
 
       - name: Create GitHub Release
@@ -243,36 +229,26 @@ jobs:
           tag_name: v${{ steps.version.outputs.name }}-build.${{ github.run_number }}
           name: "Ryzix VM v${{ steps.version.outputs.name }} (Build #${{ github.run_number }})"
           body: |
-            ## Ryzix VM - Android Virtual Machine
+            ## Ryzix VM — Android Virtual Machine
 
-            **Automated release build**
+            **Automated build**
             - Branch: `${{ github.ref_name }}`
             - Commit: `${{ github.sha }}`
-            - Build: #${{ github.run_number }}`
+            - Build: #${{ github.run_number }}
 
-            ## What's included
-            - QEMU-powered ARM64 virtual machine
-            - Jetpack Compose UI
-            - VNC display support
-            - Kotlin + C++ (NDK)
+            ## Install
+            1. Download APK below
+            2. Allow unknown sources on your phone
+            3. Install and open
 
-            ## First time setup
-            1. Install APK (allow unknown sources)
-            2. Download a Linux image (see README)
-            3. Create a VM and point to your image
-            4. Start VM — display connects via built-in VNC
+            ## First run
+            1. Download a Linux image (Tiny Core ~100MB for test, Debian 12 XFCE ~700MB for full)
+            2. Create a VM, set image path
+            3. Start VM — display auto-connects via built-in VNC
 
-            ## Minimum requirements
-            - Android 8.0+ (API 26)
-            - ARM64 device
-            - 4GB RAM recommended
-            - 6GB free storage (for OS image)
-
-            > **Note:** If QEMU build failed in CI, app runs in stub mode.
-            > Build full QEMU locally with NDK r27c.
+            > If QEMU build failed in CI, app runs in stub mode (UI works, no actual VM).
           draft: false
           prerelease: true
-          files: |
-            ryzix-vm/output/*.apk
+          files: output/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
