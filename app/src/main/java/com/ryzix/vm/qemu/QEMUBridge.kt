@@ -13,34 +13,39 @@ object QEMUBridge {
         try {
             System.loadLibrary("ryzixvm")
             Log.i(TAG, "Native bridge loaded successfully")
-            // DO NOT call getVersion() here — it used to trigger dlopen of the
-            // QEMU library at startup, which runs QEMU's global C++ constructors
-            // and causes an immediate SIGSEGV on MIUI / strict-SELinux devices.
-            // getVersion() now only stat()s the file and is safe to call later.
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "Failed to load native bridge: ${e.message}")
         }
     }
 
+    /**
+     * Start QEMU.
+     * [biosDir]     = directory containing bios-256k.bin and other ROM files
+     * [storageDir]  = writable app directory (passed to Limbo's set_jni as
+     *                 storage_base_dir so android_fopen doesn't crash on NULL)
+     */
     fun startQEMU(context: Context, args: Array<String>): Int {
         val nativeLibDir = context.applicationInfo.nativeLibraryDir
-        val qemuLibPath = "$nativeLibDir/$QEMU_LIB_NAME"
+        val qemuLibPath  = "$nativeLibDir/$QEMU_LIB_NAME"
+        val biosDir      = File(context.filesDir, "qemu_bios").absolutePath
+        val storageDir   = context.filesDir.absolutePath
         Log.i(TAG, "QEMU lib: $qemuLibPath (exists=${File(qemuLibPath).exists()})")
-        return nativeStartQEMU(qemuLibPath, args)
+        Log.i(TAG, "biosDir=$biosDir  storageDir=$storageDir")
+        return nativeStartQEMU(qemuLibPath, biosDir, storageDir, args)
     }
 
-    /**
-     * Returns the QEMU version string.
-     * Safe to call at any time — uses stat() only, never dlopen.
-     * [nativeLibDir] = context.applicationInfo.nativeLibraryDir
-     */
     fun getVersion(nativeLibDir: String): String = try {
         getVersion_native(nativeLibDir)
     } catch (e: UnsatisfiedLinkError) {
         "Native bridge not loaded"
     }
 
-    private external fun nativeStartQEMU(libPath: String, args: Array<String>): Int
+    private external fun nativeStartQEMU(
+        libPath: String,
+        biosDir: String,
+        storageDir: String,
+        args: Array<String>
+    ): Int
 
     external fun stopQEMU()
     external fun isRunning(): Boolean

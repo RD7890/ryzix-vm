@@ -95,6 +95,15 @@ jobs:
           echo "=== arm64-v8a native libs ==="
           ls -lh app/src/main/jniLibs/arm64-v8a/
 
+      - name: Extract QEMU BIOS files from Limbo APK
+        run: |
+          mkdir -p app/src/main/assets/qemu_bios
+          unzip -j /tmp/limbo.apk "assets/*.bin" -d app/src/main/assets/qemu_bios/ 2>/dev/null || true
+          unzip -j /tmp/limbo.apk "assets/*.rom" -d app/src/main/assets/qemu_bios/ 2>/dev/null || true
+          unzip -j /tmp/limbo.apk "assets/*.img" -d app/src/main/assets/qemu_bios/ 2>/dev/null || true
+          echo "=== BIOS assets ==="
+          ls -lh app/src/main/assets/qemu_bios/ 2>/dev/null || echo "No BIOS files found"
+
       # The cache key is fixed ("v1") so the keystore is generated exactly
       # once and reused on every subsequent build — giving every APK the
       # same Android signing certificate and allowing direct over-the-air

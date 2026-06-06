@@ -49,7 +49,6 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
     private val _qemuVersion = MutableStateFlow("")
     val qemuVersion: StateFlow<String> = _qemuVersion
 
-    // null = idle, 0.0..1.0 = downloading in progress
     private val _downloadProgress = MutableStateFlow<Float?>(null)
     val downloadProgress: StateFlow<Float?> = _downloadProgress
 
@@ -68,13 +67,16 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) {
             "Library not loaded"
         }
-        // Only add defaults if nothing was saved previously
         if (_vmList.value.isEmpty()) {
             addDefaultVMs()
         }
+        // Copy BIOS/ROM files from assets to internal storage on first run
+        viewModelScope.launch(Dispatchers.IO) {
+            copyBiosAssets(getApplication())
+        }
     }
 
-    // ─── Persistence (SharedPreferences + org.json) ───────────────────────────
+    // ── Persistence ──────────────────────────────────────────────────────────
 
     private fun loadVMList() {
         val prefs = getApplication<Application>()
@@ -87,19 +89,19 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
                 val o = arr.getJSONObject(i)
                 list.add(
                     VMConfig(
-                        id            = o.optString("id",   java.util.UUID.randomUUID().toString()),
-                        name          = o.optString("name", "VM"),
-                        arch          = runCatching { VMArch.valueOf(o.optString("arch")) }
-                                            .getOrDefault(VMArch.X86_64),
-                        ramMB         = o.optInt("ramMB",     512),
-                        cpuCores      = o.optInt("cpuCores",    2),
-                        diskImagePath = o.optString("diskImagePath",  ""),
-                        cdromImagePath= o.optString("cdromImagePath", ""),
-                        vncPort       = o.optInt("vncPort",  5900),
-                        bootFromCdrom = o.optBoolean("bootFromCdrom", true),
-                        enableKvm     = o.optBoolean("enableKvm",    false),
-                        extraArgs     = o.optString("extraArgs",       ""),
-                        createdAt     = o.optLong("createdAt",  System.currentTimeMillis())
+                        id             = o.optString("id",   java.util.UUID.randomUUID().toString()),
+                        name           = o.optString("name", "VM"),
+                        arch           = runCatching { VMArch.valueOf(o.optString("arch")) }
+                                             .getOrDefault(VMArch.X86_64),
+                        ramMB          = o.optInt("ramMB",     512),
+                        cpuCores       = o.optInt("cpuCores",    2),
+                        diskImagePath  = o.optString("diskImagePath",  ""),
+                        cdromImagePath = o.optString("cdromImagePath", ""),
+                        vncPort        = o.optInt("vncPort",  5900),
+                        bootFromCdrom  = o.optBoolean("bootFromCdrom", true),
+                        enableKvm      = o.optBoolean("enableKvm",    false),
+                        extraArgs      = o.optString("extraArgs",       ""),
+                        createdAt      = o.optLong("createdAt",  System.currentTimeMillis())
                     )
                 )
             }
@@ -131,29 +133,25 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
             }
             getApplication<Application>()
                 .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(PREFS_KEY_VMS, arr.toString())
-                .apply()
-            Log.i(TAG, "Saved ${_vmList.value.size} VMs to prefs")
+                .edit().putString(PREFS_KEY_VMS, arr.toString()).apply()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to save VM list: ${e.message}")
         }
     }
 
-    // ─── VM management ────────────────────────────────────────────────────────
+    // ── VM management ─────────────────────────────────────────────────────────
 
     private fun addDefaultVMs() {
         _vmList.value = listOf(
             VMConfig(
                 name = "Alpine Linux (Test)",
                 arch = VMArch.X86_64,
-                ramMB = 512,
+                ramMB = 256,
                 cpuCores = 1,
                 cdromImagePath = "",
                 bootFromCdrom = true
             )
         )
-        // Don't save defaults — let the user configure real paths first
     }
 
     fun addVM(config: VMConfig) {
@@ -166,7 +164,7 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
         saveVMList()
     }
 
-    // ─── VM lifecycle ─────────────────────────────────────────────────────────
+    // ── VM lifecycle ──────────────────────────────────────────────────────────
 
     fun startVM(config: VMConfig) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -175,15 +173,17 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
             _statusMessage.value = "Starting ${config.name}…"
 
             try {
-                val args = config.toQEMUArgs()
+                val app = getApplication<Application>()
+                val biosDir = File(app.filesDir, "qemu_bios").absolutePath
+                val args = config.toQEMUArgs(biosDir)
                 Log.i(TAG, "QEMU args: ${args.joinToString(" ")}")
 
-                val svcIntent = Intent(getApplication(), QEMUService::class.java).apply {
+                val svcIntent = Intent(app, QEMUService::class.java).apply {
                     putExtra("vm_name", config.name)
                 }
-                getApplication<Application>().startForegroundService(svcIntent)
+                app.startForegroundService(svcIntent)
 
-                val result = QEMUBridge.startQEMU(getApplication(), args)
+                val result = QEMUBridge.startQEMU(app, args)
                 if (result == 0) {
                     _vmStatus.value = VMStatus.RUNNING
                     _statusMessage.value = "${config.name} is running"
@@ -218,40 +218,52 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // ─── Storage helpers ──────────────────────────────────────────────────────
+    // ── BIOS asset copy ───────────────────────────────────────────────────────
 
     /**
-     * Returns the RyzixVM directory on external storage.
-     * Primary: /storage/emulated/0/RyzixVM/ (visible in any file manager).
-     * Fallback: app-scoped external dir (always writable, still visible on most
-     * Android versions under Android/data/com.ryzix.vm/files/RyzixVM/).
+     * Copies QEMU BIOS files from app assets (bundled at build time from the
+     * Limbo APK) to internal storage so QEMU can load them via -L flag.
      */
+    private fun copyBiosAssets(context: Context) {
+        val biosDir = File(context.filesDir, "qemu_bios")
+        biosDir.mkdirs()
+        try {
+            val files = context.assets.list("qemu_bios") ?: emptyArray()
+            if (files.isEmpty()) {
+                Log.w(TAG, "No BIOS assets found in assets/qemu_bios/")
+                return
+            }
+            for (file in files) {
+                val dest = File(biosDir, file)
+                if (dest.exists()) continue
+                context.assets.open("qemu_bios/$file").use { i ->
+                    FileOutputStream(dest).use { o -> i.copyTo(o) }
+                }
+            }
+            Log.i(TAG, "BIOS assets ready: ${files.size} files in ${biosDir.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "copyBiosAssets failed: ${e.message}")
+        }
+    }
+
+    // ── Storage helpers ───────────────────────────────────────────────────────
+
     fun getRyzixVMDir(context: Context): File {
         val primary = File(Environment.getExternalStorageDirectory(), "RyzixVM")
         return try {
             if (primary.exists() || primary.mkdirs()) {
                 val probe = File(primary, ".probe")
-                probe.createNewFile()
-                probe.delete()
+                probe.createNewFile(); probe.delete()
                 primary
-            } else {
-                fallbackDir(context)
-            }
-        } catch (_: Exception) {
-            fallbackDir(context)
-        }
+            } else fallbackDir(context)
+        } catch (_: Exception) { fallbackDir(context) }
     }
 
     private fun fallbackDir(context: Context): File =
         File(context.getExternalFilesDir(null), "RyzixVM").also { it.mkdirs() }
 
-    // ─── Download & auto-setup ────────────────────────────────────────────────
+    // ── Download & auto-setup ─────────────────────────────────────────────────
 
-    /**
-     * Downloads Alpine Linux virt ISO (~60 MB), shows live % progress,
-     * then automatically creates a ready-to-boot VM config so the user
-     * only needs to tap Start.
-     */
     fun downloadAndSetup(context: Context) {
         if (_downloadProgress.value != null) return
         downloadJob?.cancel()
@@ -259,8 +271,8 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
             _downloadProgress.value = 0f
             _downloadMessage.value = "Connecting…"
 
-            val dir      = getRyzixVMDir(context)
-            val isoFile  = File(dir, "alpine-virt-3.19-x86_64.iso")
+            val dir     = getRyzixVMDir(context)
+            val isoFile = File(dir, "alpine-virt-3.19-x86_64.iso")
 
             try {
                 val conn = URL(
@@ -274,7 +286,7 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
 
                 if (conn.responseCode !in 200..299) {
                     _downloadProgress.value = null
-                    _downloadMessage.value = "Server error ${conn.responseCode} — check internet"
+                    _downloadMessage.value = "Server error ${conn.responseCode}"
                     return@launch
                 }
 
@@ -289,9 +301,7 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
                         while (n >= 0 && isActive) {
                             output.write(buf, 0, n)
                             downloaded += n
-                            if (total > 0) {
-                                _downloadProgress.value = downloaded.toFloat() / total.toFloat()
-                            }
+                            if (total > 0) _downloadProgress.value = downloaded.toFloat() / total
                             n = input.read(buf)
                         }
                     }
@@ -304,28 +314,23 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
 
-                // ── Auto-create a ready-to-boot VM ────────────────────────
                 val vm = VMConfig(
                     name           = "Alpine Linux 3.19",
                     arch           = VMArch.X86_64,
-                    ramMB          = 512,
+                    ramMB          = 256,
                     cpuCores       = 1,
                     cdromImagePath = isoFile.absolutePath,
                     diskImagePath  = "",
                     bootFromCdrom  = true,
                     vncPort        = 5900
                 )
-                // Remove any existing Alpine entry before adding the fresh one
-                _vmList.value = _vmList.value
-                    .filter { it.name != vm.name } + vm
+                _vmList.value = _vmList.value.filter { it.name != vm.name } + vm
                 saveVMList()
 
                 _downloadProgress.value = null
                 _downloadMessage.value  =
                     "Done! \"Alpine Linux 3.19\" VM created.\n" +
-                    "ISO: ${isoFile.absolutePath}\n" +
-                    "Go to Home and tap Start."
-                Log.i(TAG, "ISO saved + VM created: ${isoFile.absolutePath}")
+                    "ISO: ${isoFile.absolutePath}\nGo to Home and tap Start."
 
             } catch (e: Exception) {
                 isoFile.delete()
@@ -338,12 +343,11 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelDownload() {
         downloadJob?.cancel()
-        downloadJob = null
         _downloadProgress.value = null
         _downloadMessage.value  = "Download cancelled"
     }
 
-    // ─── VNC ──────────────────────────────────────────────────────────────────
+    // ── VNC ───────────────────────────────────────────────────────────────────
 
     private suspend fun connectVNC(config: VMConfig) {
         _statusMessage.value = "Connecting to display…"
@@ -355,7 +359,7 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
             }
             delay(1000)
         }
-        _statusMessage.value = "Display connection failed — VM may still be running"
+        _statusMessage.value = "Display unavailable — VM may still be running"
     }
 
     private fun startVNCPolling() {
@@ -366,7 +370,7 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
                     vncClient.requestFramebufferUpdate(incremental = true)
                     delay(33)
                 } catch (e: Exception) {
-                    Log.e(TAG, "VNC polling error: ${e.message}")
+                    Log.e(TAG, "VNC polling: ${e.message}")
                     break
                 }
             }
