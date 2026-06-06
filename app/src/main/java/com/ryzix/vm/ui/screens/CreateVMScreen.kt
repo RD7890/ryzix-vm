@@ -188,24 +188,24 @@ fun CreateVMScreen(
             )
 
             // Disk image path
-            SectionLabel("Disk Image Path (qcow2)")
+            SectionLabel("Disk Image Path (qcow2) — optional")
             OutlinedTextField(
                 value = diskImagePath,
                 onValueChange = { diskImagePath = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("/storage/emulated/0/ryzix/disk.qcow2", fontSize = 12.sp) },
+                placeholder = { Text("/storage/emulated/0/RyzixVM/disk.qcow2", fontSize = 12.sp) },
                 colors = textFieldColors(),
                 shape = RoundedCornerShape(12.dp),
                 singleLine = true
             )
 
             // CDROM path
-            SectionLabel("CDROM / ISO Path (optional)")
+            SectionLabel("CDROM / ISO Path — use the path from Settings download")
             OutlinedTextField(
                 value = cdromImagePath,
                 onValueChange = { cdromImagePath = it },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("/storage/emulated/0/ryzix/linux.iso", fontSize = 12.sp) },
+                placeholder = { Text("/storage/emulated/0/RyzixVM/alpine-virt-3.19-x86_64.iso", fontSize = 11.sp) },
                 colors = textFieldColors(),
                 shape = RoundedCornerShape(12.dp),
                 singleLine = true
