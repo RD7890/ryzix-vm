@@ -104,7 +104,18 @@ Java_com_ryzix_vm_qemu_QEMUBridge_getVersion(
         JNIEnv *env,
         jobject) {
     if (qemu_handle) {
+        // Already running — QEMU is fully active
         return env->NewStringUTF("QEMU 5.1.0 (Limbo/Android, x86_64 guest)");
     }
-    return env->NewStringUTF("QEMU not loaded yet");
+    // Not started yet — probe whether the library is reachable in this app's
+    // linker namespace. After System.loadLibrary("ryzixvm") the app's
+    // nativeLibraryDir is already part of the namespace, so a short-name
+    // dlopen finds libqemu-system-x86_64.so without needing the full path.
+    void *probe = dlopen("libqemu-system-x86_64.so", RTLD_LAZY | RTLD_LOCAL);
+    if (probe) {
+        dlclose(probe);
+        return env->NewStringUTF("QEMU 5.1.0 (Limbo/Android, x86_64 guest)");
+    }
+    LOGE("QEMU library probe failed: %s", dlerror());
+    return env->NewStringUTF("QEMU library not found");
 }

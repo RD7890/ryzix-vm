@@ -46,6 +46,13 @@ fun VMConfig.toQEMUArgs(): Array<String> {
     args.add("base=utc")
     args.add("-no-reboot")
 
+    // Prevent QEMU from reading /etc/qemu/*.conf and ~/.config/qemu/*.conf.
+    // Those paths don't exist on Android; Limbo's android_fopen crashes with
+    // SIGSEGV (null ptr in strcpy) when QEMU passes a null-resolved config
+    // path to it. These flags skip qemu_read_config_file() entirely.
+    args.add("-nodefconfig")
+    args.add("-no-user-config")
+
     when (arch) {
         VMArch.AARCH64 -> {
             args.add("-machine")
