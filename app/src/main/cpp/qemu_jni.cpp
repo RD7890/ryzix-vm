@@ -5,6 +5,7 @@
 #include <atomic>
 #include <vector>
 #include <dlfcn.h>
+#include <sys/stat.h>
 
 #define LOG_TAG "RyzixVM"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -47,7 +48,7 @@ Java_com_ryzix_vm_qemu_QEMUBridge_nativeStartQEMU(
     LOGI("Loading QEMU library: %s", qemu_lib.c_str());
     qemu_handle = dlopen(qemu_lib.c_str(), RTLD_LAZY | RTLD_GLOBAL);
     if (!qemu_handle) {
-        LOGE("dlopen(%s) failed: %s — trying by name", qemu_lib.c_str(), dlerror());
+        LOGE("dlopen(%s) failed: %s — trying by short name", qemu_lib.c_str(), dlerror());
         qemu_handle = dlopen("libqemu-system-x86_64.so", RTLD_LAZY | RTLD_GLOBAL);
     }
     if (!qemu_handle) {
@@ -99,23 +100,35 @@ Java_com_ryzix_vm_qemu_QEMUBridge_isRunning(
     return (jboolean) vm_running.load();
 }
 
+/**
+ * getVersion: NEVER calls dlopen — that would load QEMU's global constructors
+ * at app startup and crash on strict-SELinux / MIUI kernels.
+ * We only stat() the .so file to confirm it exists, then return the version string.
+ * dlopen happens only in nativeStartQEMU when the user explicitly starts a VM.
+ */
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_ryzix_vm_qemu_QEMUBridge_getVersion(
+Java_com_ryzix_vm_qemu_QEMUBridge_getVersion_1native(
         JNIEnv *env,
-        jobject) {
+        jobject,
+        jstring nativeLibDirJ) {
+
     if (qemu_handle) {
-        // Already running — QEMU is fully active
+        // Already loaded (a VM was started) — definitely present
         return env->NewStringUTF("QEMU 5.1.0 (Limbo/Android, x86_64 guest)");
     }
-    // Not started yet — probe whether the library is reachable in this app's
-    // linker namespace. After System.loadLibrary("ryzixvm") the app's
-    // nativeLibraryDir is already part of the namespace, so a short-name
-    // dlopen finds libqemu-system-x86_64.so without needing the full path.
-    void *probe = dlopen("libqemu-system-x86_64.so", RTLD_LAZY | RTLD_LOCAL);
-    if (probe) {
-        dlclose(probe);
+
+    // Check file existence with stat() — zero native code execution,
+    // no dlopen, no global constructors, no crash risk.
+    const char *dir = env->GetStringUTFChars(nativeLibDirJ, nullptr);
+    std::string libPath = std::string(dir) + "/libqemu-system-x86_64.so";
+    env->ReleaseStringUTFChars(nativeLibDirJ, dir);
+
+    struct stat st{};
+    if (stat(libPath.c_str(), &st) == 0 && st.st_size > 0) {
+        LOGI("QEMU library found at %s (%lld bytes)", libPath.c_str(), (long long)st.st_size);
         return env->NewStringUTF("QEMU 5.1.0 (Limbo/Android, x86_64 guest)");
     }
-    LOGE("QEMU library probe failed: %s", dlerror());
-    return env->NewStringUTF("QEMU library not found");
+
+    LOGE("QEMU library not found at %s", libPath.c_str());
+    return env->NewStringUTF("QEMU library not found — reinstall app");
 }

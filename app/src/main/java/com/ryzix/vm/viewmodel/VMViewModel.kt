@@ -63,7 +63,8 @@ class VMViewModel(application: Application) : AndroidViewModel(application) {
     init {
         loadVMList()
         _qemuVersion.value = try {
-            QEMUBridge.getVersion()
+            val nativeLibDir = getApplication<Application>().applicationInfo.nativeLibraryDir
+            QEMUBridge.getVersion(nativeLibDir)
         } catch (e: Exception) {
             "Library not loaded"
         }

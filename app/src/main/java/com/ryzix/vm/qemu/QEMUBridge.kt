@@ -12,7 +12,11 @@ object QEMUBridge {
     init {
         try {
             System.loadLibrary("ryzixvm")
-            Log.i(TAG, "Native bridge loaded: ${getVersion()}")
+            Log.i(TAG, "Native bridge loaded successfully")
+            // DO NOT call getVersion() here — it used to trigger dlopen of the
+            // QEMU library at startup, which runs QEMU's global C++ constructors
+            // and causes an immediate SIGSEGV on MIUI / strict-SELinux devices.
+            // getVersion() now only stat()s the file and is safe to call later.
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "Failed to load native bridge: ${e.message}")
         }
@@ -25,9 +29,22 @@ object QEMUBridge {
         return nativeStartQEMU(qemuLibPath, args)
     }
 
+    /**
+     * Returns the QEMU version string.
+     * Safe to call at any time — uses stat() only, never dlopen.
+     * [nativeLibDir] = context.applicationInfo.nativeLibraryDir
+     */
+    fun getVersion(nativeLibDir: String): String = try {
+        getVersion_native(nativeLibDir)
+    } catch (e: UnsatisfiedLinkError) {
+        "Native bridge not loaded"
+    }
+
     private external fun nativeStartQEMU(libPath: String, args: Array<String>): Int
 
     external fun stopQEMU()
     external fun isRunning(): Boolean
-    external fun getVersion(): String
+
+    @Suppress("FunctionName")
+    private external fun getVersion_native(nativeLibDir: String): String
 }

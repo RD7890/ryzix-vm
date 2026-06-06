@@ -95,20 +95,33 @@ jobs:
           echo "=== arm64-v8a native libs ==="
           ls -lh app/src/main/jniLibs/arm64-v8a/
 
-      - name: Generate signing keystore
+      # The cache key is fixed ("v1") so the keystore is generated exactly
+      # once and reused on every subsequent build — giving every APK the
+      # same Android signing certificate and allowing direct over-the-air
+      # updates without uninstalling first.
+      - name: Restore signing keystore from cache
+        id: keystore-cache
+        uses: actions/cache@v4
+        with:
+          path: signing/ryzixvm-release.jks
+          key: ryzixvm-signing-keystore-v1
+
+      - name: Generate signing keystore (first run only)
+        if: steps.keystore-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p signing
           keytool -genkey -v \
-            -keystore signing/signing-key.jks \
+            -keystore signing/ryzixvm-release.jks \
             -alias RyzixVM \
-            -keyalg RSA -keysize 2048 -validity 10000 \
+            -keyalg RSA -keysize 2048 -validity 36500 \
             -storepass ryzixvm123 -keypass ryzixvm123 \
             -dname "CN=Ryzix VM,OU=Android,O=Ryzix,L=Unknown,S=Unknown,C=US" \
             2>&1 | tail -3
+          echo "New keystore generated and will be cached for all future builds"
 
       - name: Create local.properties
         run: |
-          echo "signing.storeFile=signing/signing-key.jks" > local.properties
+          echo "signing.storeFile=signing/ryzixvm-release.jks" > local.properties
           echo "signing.storePassword=ryzixvm123" >> local.properties
           echo "signing.keyAlias=RyzixVM" >> local.properties
           echo "signing.keyPassword=ryzixvm123" >> local.properties
